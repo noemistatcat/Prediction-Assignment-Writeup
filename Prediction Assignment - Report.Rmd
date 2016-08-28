@@ -1,0 +1,162 @@
+---
+title: "Prediction Assignment"
+author: "Noemi Ramiro"
+date: "August 21, 2016"
+output: html_document
+---
+##Overview
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+The objective of this report is to demonstrate the process employed to arrive at a prediction algorithm, which aims to classify the manner in which the participants employed certain exercises. The data comes from accelerometers attached on the belt, forearm and dumbells.
+
+##Data Cleaning 
+
+The dataset consists of 159 variables all in all. Excluding the outcome variable "Classe"", there are 158 candidates to be included as predictors. However, a close examination of the data would indicate that some variables might not be useful in the model. For instance, some variables have plenty of missing values and NA's (see below for the total number of NAs for the first 30 variables)  
+
+```{r}
+pml <- read.csv("pml-training.csv",header = TRUE);
+pml[pml==""] <- NA
+head(sapply(pml, function(x) sum(is.na(x))),n=30)
+```
+
+The step below is therefore executed to exclude the variables with missing values:
+
+```{r}
+pml <- pml[, colSums(is.na(pml)) == 0] 
+```
+
+Aside from this, the first seven variables are also excluded in the analysis as they're simply identifiers and most likely would not add predictive value to the model: 
+
+```{r, echo=FALSE}
+names(pml[,1:7])
+```
+
+```{r}
+pml <- pml[,-c(1:7)]
+```
+
+
+After all the necessary steps done to clean the dataset, it is now ready for splitting into training and test sets for validation.
+
+##Data Splitting (Training and Test Set)
+
+The data is split into the training set (for model building) and test set (for validation). Because the dataset is quite large, it was decided to allocate 80% for training and 20% for validation.
+
+```{r, message=FALSE}
+library(caret)
+set.seed(18)
+inTrain <- createDataPartition(y=pml$classe, p=0.8, list=F)
+training <- pml[inTrain,]
+testing <- pml[-inTrain,]
+```
+
+##PCA to Preprocess the Data
+
+As there are 52 candidate predictors for the model, it makes sense to employ a dimension reduction technique to manage this large number of predictors. Principal Components Analysis (PCA) was done on the training data to determine key components among the predictors.  
+
+```{r,echo=FALSE}
+pca <- prcomp(training[,1:52], scale=T, center=T)
+summary(pca)
+```
+
+Based on the results, the 80% cut-off for variance explained is reached at the 12th principal component. It is therefore decided to choose up to 12th PC to be included in the possible model.
+
+The PCA loadings are then used to predict the PC scores (1-12) for both training and test samples:
+
+```{r}
+scores <- predict(pca,training[,1:52])
+training <- cbind.data.frame(training,scores[,1:12])
+
+scores.test <- predict(pca,testing)
+testing <- cbind.data.frame(testing,scores.test[,1:12])
+```
+
+##Actual Modelling and Model Selection
+Random forest and Boosting are selected as possible algorithms due to the fact that they are known for delivering high accuracies in prediction competitions. Both algorithms were performed on the 52 predictors AND on the PCA data, such that there are 4 candidate models all in all.
+
+Before running the models, parallel processing was set-up:
+
+```{r, message=FALSE}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+fitControl <- trainControl(method = "oob", allowParallel = TRUE)
+```
+
+The different models are then ran:
+
+```{r, echo=FALSE, message=FALSE}
+fit.rf <- train(classe ~ ., data=training[,1:53], method="rf", prox=T, trControl=fitControl)
+pred.rf <- predict(fit.rf, testing)
+confusion.rf <- confusionMatrix(pred.rf, testing$classe)
+rel.imp.rf <- varImp(fit.rf)
+
+final.test <- read.csv("pml-testing.csv",header = TRUE)
+predict.final <- predict(fit.rf, newdata=final.test)
+rm(fit.rf)
+
+fit.rf.pc <- train(classe ~ ., data=training[,53:65], method="rf", prox=T, trControl=fitControl)
+pred.rf.pc <- predict(fit.rf.pc, testing)
+confusion.rf.pc <- confusionMatrix(pred.rf.pc, testing$classe)
+rm(fit.rf.pc)
+
+fit.boost <- train(classe ~ ., data=training[,1:53], method="gbm",verbose=FALSE)
+pred.boost <- predict(fit.boost, testing)
+confusion.boost <- confusionMatrix(pred.boost, testing$classe)
+rm(fit.boost)
+
+fit.boost.pc <- train(classe ~ ., data=training[,53:65], method="gbm",verbose=FALSE)
+pred.boost.pc <- predict(fit.boost.pc, testing)
+confusion.boost.pc <- confusionMatrix(pred.boost.pc, testing$classe)
+rm(fit.boost.pc)
+```
+
+```{r, eval=FALSE}
+fit.rf <- train(classe ~ ., data=training[,1:53], method="rf", prox=T, trControl=fitControl)
+
+fit.rf.pc <- train(classe ~ ., data=training[,53:65], method="rf", prox=T, trControl=fitControl)
+
+fit.boost <- train(classe ~ ., data=training[,1:53], method="gbm",verbose=FALSE)
+
+fit.boost.pc <- train(classe ~ ., data=training[,53:65], method="gbm",verbose=FALSE)
+```
+
+Afterwards, parallel processing is ended:
+
+```{r}
+stopCluster(cluster)
+```
+
+The accuracies of the different models are then compared, to be able to decide which one to use for the final prediction task:
+
+```{r, echo=FALSE}
+accuracy <- rbind(confusion.rf$overall,
+                  confusion.rf.pc$overall,
+                  confusion.boost$overall,
+                  confusion.boost.pc$overall)
+row.names(accuracy) <- c("Random Forest w/o PCA", 
+                         "Random Forest w/ PCA",
+                         "Boosting w/o PCA",
+                         "Boosting w/ PCA")
+print(accuracy)
+```
+
+From this, we can see that Random Forest w/o PCA is the model with the highest accuracy (at 99.3%). It is then selected as the final model to be used for prediction.
+
+##Prediction Task
+
+For the final task, the selected model (using Random Forest without PCA) is then used to predict the 20 out-of-sample observations:
+
+
+```{r, eval=FALSE}
+final.test <- read.csv("pml-testing.csv",header = TRUE)
+predict.final <- predict(fit.rf, newdata=final.test)
+print(predict.final)
+```
+
+```{r,}
+print(predict.final)
+```
